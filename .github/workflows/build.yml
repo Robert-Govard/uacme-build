@@ -1,0 +1,160 @@
+name: Build UACME
+
+# Полностью автоматизированная сборка UACME в облаке (GitHub Actions, Windows-раннер).
+# Воспроизводит ручной конвейер из README:
+#   1. Собрать payload-модули (Fubuki x86/x64, Akatsuki x64)
+#   2. Собрать Naka
+#   3. Naka шифрует каждый payload -> .cd + .key
+#   4. Naka --stable -> secrets64.bin / secrets32.bin
+#   5. Положить .cd и secrets в Source/Akagi/bin
+#   6. Собрать Akagi (x64 и Win32)
+# Результат — готовые Akagi64.exe / Akagi32.exe в артефактах сборки.
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      SLN: Source\uacme.sln
+      # На бесплатных раннерах стоит VS2022 => тулсет v143.
+      # В проектах прописан v145 (VS2026), поэтому переопределяем.
+      TOOLSET: v143
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # ---------- 1. Payload-модули ----------
+      - name: Build Fubuki (Win32)
+        run: msbuild $env:SLN /t:Fubuki /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET
+
+      - name: Build Fubuki (x64)
+        run: msbuild $env:SLN /t:Fubuki /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+
+      - name: Build Akatsuki (x64)
+        run: msbuild $env:SLN /t:Akatsuki /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+
+      # ---------- 2. Naka ----------
+      - name: Build Naka (x64)
+        run: msbuild $env:SLN /t:Naka /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+
+      # ---------- 3-4. Генерация зашифрованных payload'ов и secrets ----------
+      - name: Pack payloads with Naka
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          function Find-One([string]$name) {
+            $f = Get-ChildItem -Path "Source" -Recurse -Filter $name -File |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $f) { throw "Не найден файл сборки: $name" }
+            return $f.FullName
+          }
+
+          $fubuki32  = Find-One "Fubuki32.dll"
+          $fubuki64  = Find-One "Fubuki64.dll"
+          $akatsuki  = Find-One "Akatsuki64.dll"
+          $naka      = Find-One "Naka64.exe"
+          $kamikaze  = (Resolve-Path "Source\Kamikaze\Kamikaze.msc").Path
+
+          Write-Host "Fubuki32 : $fubuki32"
+          Write-Host "Fubuki64 : $fubuki64"
+          Write-Host "Akatsuki : $akatsuki"
+          Write-Host "Naka     : $naka"
+          Write-Host "Kamikaze : $kamikaze"
+
+          # Рабочая папка: Naka пишет .cd/.key рядом со входным файлом,
+          # а --stable читает .key из текущего каталога.
+          $stage = Join-Path $env:GITHUB_WORKSPACE "nakastage"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          # Имена входных файлов должны совпадать с тем, что ждёт Naka --stable:
+          # Fubuki32.key, Fubuki64.key, Akatsuki64.key, Kamikaze.key
+          Copy-Item $fubuki32 (Join-Path $stage "Fubuki32.dll")   -Force
+          Copy-Item $fubuki64 (Join-Path $stage "Fubuki64.dll")   -Force
+          Copy-Item $akatsuki (Join-Path $stage "Akatsuki64.dll") -Force
+          Copy-Item $kamikaze (Join-Path $stage "Kamikaze.msc")   -Force
+
+          # Naka — подсистема Windows, поэтому ждём завершения через -Wait.
+          function Run-Naka([string[]]$naArgs) {
+            $p = Start-Process -FilePath $naka -ArgumentList $naArgs `
+                   -WorkingDirectory $stage -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "Naka вернул код $($p.ExitCode) для: $naArgs" }
+          }
+
+          # 3. Шифруем каждый payload -> .cd + .key
+          Run-Naka @("Fubuki32.dll")
+          Run-Naka @("Fubuki64.dll")
+          Run-Naka @("Akatsuki64.dll")
+          Run-Naka @("Kamikaze.msc")
+
+          # 4. Таблицы ключей
+          Run-Naka @("--stable")
+
+          Write-Host "`nСодержимое stage после Naka:"
+          Get-ChildItem $stage | Format-Table Name, Length
+
+          # Проверяем, что всё сгенерировалось и не пустое
+          $required = @("Fubuki32.cd","Fubuki64.cd","Akatsuki64.cd","Kamikaze.cd",
+                        "secrets64.bin","secrets32.bin")
+          foreach ($r in $required) {
+            $full = Join-Path $stage $r
+            if (-not (Test-Path $full)) { throw "Naka не создал $r" }
+            if ((Get-Item $full).Length -eq 0) { throw "$r пустой" }
+          }
+
+          # 5. Кладём блобы в Source/Akagi/bin (перезаписываем пустые заглушки)
+          $bin = "Source\Akagi\bin"
+          Copy-Item (Join-Path $stage "Fubuki32.cd")   (Join-Path $bin "Fubuki32.cd")   -Force
+          Copy-Item (Join-Path $stage "Fubuki64.cd")   (Join-Path $bin "Fubuki64.cd")   -Force
+          Copy-Item (Join-Path $stage "Akatsuki64.cd") (Join-Path $bin "Akatsuki64.cd") -Force
+          Copy-Item (Join-Path $stage "Kamikaze.cd")   (Join-Path $bin "Kamikaze.cd")   -Force
+          Copy-Item (Join-Path $stage "secrets64.bin") (Join-Path $bin "secrets64.bin") -Force
+          Copy-Item (Join-Path $stage "secrets32.bin") (Join-Path $bin "secrets32.bin") -Force
+
+          Write-Host "`nSource/Akagi/bin после подготовки:"
+          Get-ChildItem $bin | Format-Table Name, Length
+
+      # ---------- 6. Akagi ----------
+      - name: Build Akagi (x64)
+        run: msbuild $env:SLN /t:Akagi /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+
+      - name: Build Akagi (Win32)
+        run: msbuild $env:SLN /t:Akagi /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET
+
+      # ---------- Сбор результатов ----------
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $out = Join-Path $env:GITHUB_WORKSPACE "artifacts"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          foreach ($name in @("Akagi64.exe","Akagi32.exe")) {
+            $f = Get-ChildItem -Path "Source\Akagi" -Recurse -Filter $name -File |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if ($f) {
+              Copy-Item $f.FullName (Join-Path $out $name) -Force
+              Write-Host "Собрано: $name ($($f.Length) байт)"
+            } else {
+              Write-Warning "Не найден $name"
+            }
+          }
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uacme-binaries
+          path: artifacts/*
+          if-no-files-found: error
