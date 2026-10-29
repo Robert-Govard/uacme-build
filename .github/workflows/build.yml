@@ -23,10 +23,12 @@ jobs:
     runs-on: windows-latest
 
     env:
-      SLN: Source\uacme.sln
       # На бесплатных раннерах стоит VS2022 => тулсет v143.
       # В проектах прописан v145 (VS2026), поэтому переопределяем.
       TOOLSET: v143
+      # Проекты используют $(SolutionDir) как include-путь к общим заголовкам.
+      # При прямой сборке .vcxproj его надо задать явно (с завершающим '\').
+      SOLUTION_DIR: ${{ github.workspace }}\Source\
 
     steps:
       - name: Checkout
@@ -37,17 +39,17 @@ jobs:
 
       # ---------- 1. Payload-модули ----------
       - name: Build Fubuki (Win32)
-        run: msbuild $env:SLN /t:Fubuki /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Fubuki\dll.vcxproj /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       - name: Build Fubuki (x64)
-        run: msbuild $env:SLN /t:Fubuki /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Fubuki\dll.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       - name: Build Akatsuki (x64)
-        run: msbuild $env:SLN /t:Akatsuki /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Akatsuki\Akatsuki.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       # ---------- 2. Naka ----------
       - name: Build Naka (x64)
-        run: msbuild $env:SLN /t:Naka /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Naka\Naka.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       # ---------- 3-4. Генерация зашифрованных payload'ов и secrets ----------
       - name: Pack payloads with Naka
@@ -128,10 +130,10 @@ jobs:
 
       # ---------- 6. Akagi ----------
       - name: Build Akagi (x64)
-        run: msbuild $env:SLN /t:Akagi /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Akagi\uacme.vcxproj /m /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       - name: Build Akagi (Win32)
-        run: msbuild $env:SLN /t:Akagi /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET
+        run: msbuild Source\Akagi\uacme.vcxproj /m /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=$env:TOOLSET /p:SolutionDir=$env:SOLUTION_DIR
 
       # ---------- Сбор результатов ----------
       - name: Collect binaries
